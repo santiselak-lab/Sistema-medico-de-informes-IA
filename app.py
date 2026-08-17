@@ -1,12 +1,15 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import io
 import json
 import re
+from docx import Document
 from openai import OpenAI
 from supabase import create_client
 import streamlit as st
 
-st.set_page_config(page_title="Sistema Médico", layout="wide")
+st.set_page_config(
+    page_title="Sistema Médico - Expediente Clínico", layout="wide"
+)
 
 # Lectura de credenciales
 try:
@@ -18,27 +21,24 @@ try:
         base_url="https://api.groq.com/openai/v1", api_key=groq_key
     )
     supabase = create_client(supabase_url, supabase_key)
-except Exception as e:
+except Exception:
     st.error("⚠️ Revisa las credenciales en 'Secrets' de Streamlit Cloud.")
     st.stop()
 
 
 def obtener_modelo_chat_activo():
-    """Detecta dinámicamente los modelos disponibles en Groq para evitar errores 404."""
+    """Detecta dinámicamente el modelo disponible en Groq para evitar errores 404."""
     modelos_preferidos = [
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
         "llama3-70b-8192",
-        "llama3-8b-8192",
         "mixtral-8x7b-32768",
-        "gemma2-9b-it",
     ]
     try:
         modelos_disponibles = [m.id for m in client.models.list().data]
         for m in modelos_preferidos:
             if m in modelos_disponibles:
                 return m
-        # Si ninguno de la lista preferida coincide, tomar el primer modelo de chat disponible
         for m in modelos_disponibles:
             if "whisper" not in m:
                 return m
@@ -48,15 +48,30 @@ def obtener_modelo_chat_activo():
 
 
 def formatear_fecha(iso_str):
-    """Convierte fecha ISO de Supabase a formato 'DD/MM/YYYY HH:MM hrs'"""
+    """Convierte UTC a hora local de México (-6 hrs) en formato DD/MM/YYYY HH:MM hrs"""
     try:
         dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-        return dt.strftime("%d/%m/%Y %H:%M hrs")
+        dt_local = dt - timedelta(hours=6)
+        return dt_local.strftime("%d/%m/%Y %H:%M hrs")
     except Exception:
         return iso_str[:16]
 
 
-st.sidebar.title("🏥 Menú del Sistema")
+def generar_documento_word(paciente, fecha, transcripcion):
+    """Genera un archivo Word (.docx) descargable con la transcripción"""
+    doc = Document()
+    doc.add_heading(f"Informe Clínico — {paciente}", level=1)
+    doc.add_paragraph(f"Fecha de consulta: {fecha}")
+    doc.add_heading("Transcripción del Dictado:", level=2)
+    doc.add_paragraph(transcripcion)
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+st.sidebar.title("🏥 Sistema Médico")
 rol = st.sidebar.radio(
     "Selecciona tu Rol:", ["👨‍⚕️ Vista Médico", "👩‍💼 Vista Secretaria"]
 )
@@ -85,7 +100,6 @@ if rol == "👨‍⚕️ Vista Médico":
                 "Procesando dictado médico...", expanded=True
             ) as status:
                 try:
-                    # 1. Lectura del buffer de audio
                     status.write("⏳ Leyendo archivo de audio...")
                     audio_bytes = audio_data.getvalue()
                     buffer_audio = io.BytesIO(audio_bytes)
@@ -96,37 +110,30 @@ if rol == "👨‍⚕️ Vista Médico":
                     )
                     buffer_audio.name = f"dictado.{ext}"
 
-                    # 2. Transcripción con Whisper Large v3
-                    status.write("🎙️ Transcribiendo audio con Whisper...")
+                    status.write("🎙️ Transcribiendo con Whisper...")
                     transcripcion_bruta = client.audio.transcriptions.create(
                         model="whisper-large-v3",
                         file=buffer_audio,
                         language="es",
                         prompt=(
                             "Dictado clínico formal médico. Incluye nombres de"
-                            " pacientes, expedientes, fosa ilíaca, tumoración,"
-                            " diagnóstico, hallazgos quirúrgicos y"
-                            " tratamiento."
+                            " pacientes, DNI, expedientes, fosa ilíaca,"
+                            " juntura, tumoración, diagnóstico y tratamiento."
                         ),
                     ).text
 
-                    # 3. Identificación del modelo activo y corrección
                     modelo_activo = obtener_modelo_chat_activo()
-                    status.write(
-                        f"🩺 Optimizando texto médico (Modelo:"
-                        f" {modelo_activo})..."
-                    )
+                    status.write("🩺 Optimizando términos médicos con IA...")
 
                     transcripcion_pulida = transcripcion_bruta
                     try:
                         prompt_correccion = f"""
-Eres un editor y transcriptor médico experto. Corrige y perfecciona la siguiente transcripción en bruto provista por un reconocedor de voz.
+Eres un editor y transcriptor médico experto. Corrige la siguiente transcripción en bruto provista por voz.
 
 Instrucciones:
-1. Revisa y corrige errores fonéticos de terminología médica (ejemplo: "posibilidad izquierda" -> "fosa ilíaca izquierda", "axil computa" -> "TC abdominal/axial", etc.).
-2. Asegúrate de corregir nombres de pacientes, apellidos y formatos de expediente o folio médico de forma coherente.
-3. Mantén la fidelidad exacta del mensaje original sin agregar información inventada.
-4. Devuelve ÚNICAMENTE el texto corregido.
+1. Corrige errores fonéticos de terminología médica y anatómica (fosa ilíaca, sutura/juntura, etc.).
+2. Asegúrate de estructurar adecuadamente nombres de pacientes, DNI y folios clínicos.
+3. Devuelve ÚNICAMENTE el texto corregido sin saludos ni explicaciones.
 
 Texto en bruto:
 "{transcripcion_bruta}"
@@ -141,22 +148,14 @@ Texto en bruto:
                         transcripcion_pulida = (
                             res_corr.choices[0].message.content.strip()
                         )
-                    except Exception as err_llm:
-                        status.write(
-                            "⚠️ Aviso: Usando transcripción directa de Whisper"
-                            " por contingencia."
-                        )
+                    except Exception:
+                        pass
 
-                    # 4. Extracción de Nombre del Paciente
                     status.write("🧠 Identificando paciente...")
                     nombre_paciente = "Paciente Desconocido"
-
                     try:
                         prompt_json = f"""
-Extrae el NOMBRE COMPLETO del paciente mencionado en este dictado médico.
-Responde ÚNICAMENTE en JSON con la clave "paciente".
-Ejemplo: {{"paciente": "Santiago Celac"}}
-
+Extrae el NOMBRE COMPLETO del paciente mencionado. Responde ÚNICAMENTE en JSON con la clave "paciente".
 Dictado: "{transcripcion_pulida}"
 """
                         res_json = client.chat.completions.create(
@@ -175,21 +174,19 @@ Dictado: "{transcripcion_pulida}"
                     except Exception:
                         pass
 
-                    # Respaldo con Expresión Regular si falla la extracción JSON
                     if (
                         nombre_paciente == "Paciente Desconocido"
                         or not nombre_paciente
                     ):
                         match = re.search(
-                            r"paciente\s+([A-ZÁÉÍÓÚÑa-záléíóúñ\s]{3,35})(?:,|\s+del|\s+con|\s+de|\s+en)",
+                            r"paciente\s+([A-ZÁÉÍÓÚÑa-záléíóúñ\s]{3,35})(?:,|\s+DNI|\s+del|\s+con|\s+de)",
                             transcripcion_pulida,
                             re.IGNORECASE,
                         )
                         if match:
                             nombre_paciente = match.group(1).strip().title()
 
-                    # 5. Guardar audio en Supabase Storage
-                    status.write("☁️ Guardando audio en Supabase Storage...")
+                    status.write("☁️ Almacenando audio en Supabase...")
                     nombre_limpio = re.sub(
                         r"[^\w\s-]", "", nombre_paciente
                     ).replace(" ", "_")
@@ -208,8 +205,7 @@ Dictado: "{transcripcion_pulida}"
                         "audios"
                     ).get_public_url(file_name)
 
-                    # 6. Registrar en Base de Datos
-                    status.write("💾 Registrando en la base de datos...")
+                    status.write("💾 Registrando en base de datos...")
                     supabase.table("informes").insert({
                         "paciente": nombre_paciente,
                         "transcripcion": transcripcion_pulida,
@@ -217,23 +213,23 @@ Dictado: "{transcripcion_pulida}"
                     }).execute()
 
                     status.update(
-                        label="✅ ¡Proceso completado con éxito!",
+                        label="✅ ¡Proceso completado!",
                         state="complete",
                         expanded=False,
                     )
                     st.success(
-                        f"¡Informe registrado para **{nombre_paciente}**!"
+                        f"¡Consulta guardada para **{nombre_paciente}**!"
                     )
 
                 except Exception as e:
-                    status.update(label="❌ Ocurrió un error", state="error")
-                    st.error(f"Detalle técnico del fallo: {e}")
+                    status.update(label="❌ Error en el proceso", state="error")
+                    st.error(f"Detalle técnico: {e}")
 
 # =========================================================
 # VISTA SECRETARIA
 # =========================================================
 elif rol == "👩‍💼 Vista Secretaria":
-    st.title("👩‍💼 Panel de Gestión")
+    st.title("👩‍💼 Portafolio de Gestión y Expedientes")
     try:
         respuesta = (
             supabase.table("informes")
@@ -246,28 +242,120 @@ elif rol == "👩‍💼 Vista Secretaria":
         if not datos:
             st.info("No hay informes registrados aún.")
         else:
-            opciones = [
-                f"👤 {d['paciente']} — 📅 {formatear_fecha(d['created_at'])}"
-                for d in datos
-            ]
-            seleccion = st.selectbox("Seleccionar expediente:", opciones)
-            idx = opciones.index(seleccion)
-            informe = datos[idx]
+            # Agrupar consultas por paciente para gestionar historial
+            pacientes_dict = {}
+            for d in datos:
+                nombre = d["paciente"]
+                if nombre not in pacientes_dict:
+                    pacientes_dict[nombre] = []
+                pacientes_dict[nombre].append(d)
 
-            st.markdown(f"### 👤 Paciente: **{informe['paciente']}**")
-            st.caption(
-                f"🕒 Registrado el: {formatear_fecha(informe['created_at'])}"
+            col_pac, col_vis = st.columns(2)
+            with col_pac:
+                paciente_sel = st.selectbox(
+                    "👤 Seleccionar Paciente:", list(pacientes_dict.keys())
+                )
+
+            consultas = pacientes_dict[paciente_sel]
+
+            with col_vis:
+                opciones_consultas = [
+                    f"📅 Consulta: {formatear_fecha(c['created_at'])}"
+                    for c in consultas
+                ]
+                idx_c = st.selectbox(
+                    "🕒 Seleccionar Consulta del Historial:",
+                    range(len(opciones_consultas)),
+                    format_func=lambda x: opciones_consultas[x],
+                )
+
+            informe_actual = consultas[idx_c]
+            fecha_formateada = formatear_fecha(informe_actual["created_at"])
+
+            st.divider()
+            st.markdown(f"### 📋 Paciente: **{informe_actual['paciente']}**")
+            st.caption(f"🕒 Fecha/Hora local: {fecha_formateada}")
+
+            col_txt, col_aud = st.columns(2)
+            with col_txt:
+                st.subheader("📄 Transcripción Médica")
+                st.text_area(
+                    "Dictado procesado:",
+                    informe_actual["transcripcion"],
+                    height=200,
+                )
+
+                # Exportación a Word
+                word_file = generar_documento_word(
+                    informe_actual["paciente"],
+                    fecha_formateada,
+                    informe_actual["transcripcion"],
+                )
+                st.download_button(
+                    label="📥 Descargar Informe en Word (.docx)",
+                    data=word_file,
+                    file_name=f"Informe_{informe_actual['paciente'].replace(' ', '_')}_{informe_actual['id']}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True,
+                )
+
+            with col_aud:
+                st.subheader("🔊 Audio Original")
+                st.audio(informe_actual["audio_url"])
+
+            st.divider()
+            # Sección para adjuntar y visualizar imágenes médicas del paciente
+            st.subheader("🖼️ Portafolio de Imágenes Médicas (Rayos X, ECO, TC)")
+
+            # Leer imágenes existentes de la columna JSON o fallback
+            imagenes_existentes = informe_actual.get("imagenes_urls") or []
+            if isinstance(imagenes_existentes, str):
+                try:
+                    imagenes_existentes = json.loads(imagenes_existentes)
+                except Exception:
+                    imagenes_existentes = []
+
+            imagenes_subidas = st.file_uploader(
+                "Adjuntar nuevas imágenes médicas a esta consulta:",
+                type=["png", "jpg", "jpeg", "webp"],
+                accept_multiple_files=True,
             )
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.text_area(
-                    "Transcripción Clínica (Optimizada por IA):",
-                    informe["transcripcion"],
-                    height=250,
-                )
-            with col2:
-                st.subheader("🔊 Audio Original")
-                st.audio(informe["audio_url"])
+            if imagenes_subidas and st.button("💾 Guardar Imágenes en Portafolio"):
+                nuevas_urls = list(imagenes_existentes)
+                for img in imagenes_subidas:
+                    img_bytes = img.getvalue()
+                    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    img_name = f"img_{informe_actual['id']}_{timestamp_str}_{img.name}"
+
+                    supabase.storage.from_("audios").upload(
+                        img_name,
+                        img_bytes,
+                        file_options={"content-type": img.type, "upsert": "true"},
+                    )
+                    img_url = supabase.storage.from_("audios").get_public_url(
+                        img_name
+                    )
+                    nuevas_urls.append(img_url)
+
+                # Actualizar en Supabase
+                supabase.table("informes").update(
+                    {"imagenes_urls": json.dumps(nuevas_urls)}
+                ).eq("id", informe_actual["id"]).execute()
+
+                st.success("¡Imágenes guardadas correctamente en el portafolio!")
+                st.rerun()
+
+            # Mostrar galería de imágenes guardadas
+            if imagenes_existentes:
+                st.markdown("**Imágenes en el expediente de esta consulta:**")
+                cols = st.columns(3)
+                for i, url_img in enumerate(imagenes_existentes):
+                    cols[i % 3].image(
+                        url_img, caption=f"Imagen {i+1}", use_container_width=True
+                    )
+            else:
+                st.info("No hay imágenes guardadas para esta consulta.")
+
     except Exception as e:
-        st.error(f"❌ Error al consultar la base de datos:\n\n`{e}`")
+        st.error(f"❌ Error al consultar o actualizar los expedientes:\n\n`{e}`")
