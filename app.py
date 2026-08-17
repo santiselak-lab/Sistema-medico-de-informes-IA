@@ -61,7 +61,7 @@ if rol == "👨‍⚕️ Vista Médico":
                 "Procesando dictado médico...", expanded=True
             ) as status:
                 try:
-                    # 1. Preparar audio
+                    # 1. Lectura del buffer de audio
                     status.write("⏳ Leyendo archivo de audio...")
                     audio_bytes = audio_data.getvalue()
                     buffer_audio = io.BytesIO(audio_bytes)
@@ -72,64 +72,92 @@ if rol == "👨‍⚕️ Vista Médico":
                     )
                     buffer_audio.name = f"dictado.{ext}"
 
-                    # 2. Transcripción con Whisper Large v3
-                    status.write(
-                        "🎙️ Transcribiendo audio con Whisper (Modo Médico)..."
-                    )
-                    transcripcion = client.audio.transcriptions.create(
+                    # 2. Transcripción inicial con Whisper
+                    status.write("🎙️ Transcribiendo audio con Whisper...")
+                    transcripcion_bruta = client.audio.transcriptions.create(
                         model="whisper-large-v3",
                         file=buffer_audio,
                         language="es",
                         prompt=(
-                            "Dictado clínico formal. Incluye nombre del"
-                            " paciente, expediente, diagnóstico, anatomía y"
+                            "Dictado clínico formal médico. Incluye nombres de"
+                            " pacientes, expedientes, fosa ilíaca, tumoración,"
+                            " diagnóstico, hallazgos quirúrgicos y"
                             " tratamiento."
                         ),
                     ).text
 
-                    # 3. Extracción de Nombre de Paciente
-                    status.write("🧠 Extrayendo nombre del paciente...")
+                    # 3. Corrección Clínica por Inteligencia Artificial (Llama)
+                    status.write(
+                        "🩺 Aplicando corrección de términos médicos..."
+                    )
+                    prompt_correccion = f"""
+Eres un editor y transcriptor médico experto. Corrige y perfecciona la siguiente transcripción en bruto provista por un reconocedor de voz.
+
+Instrucciones:
+1. Revisa y corrige errores fonéticos de terminología médica (ejemplo: "posibilidad izquierda" -> "fosa ilíaca izquierda", "axil computa" -> "TC abdominal/axial", etc.).
+2. Asegúrate de corregir nombres de pacientes, apellidos y formatos de expediente o folio médico de forma coherente.
+3. Mantén la fidelidad exacta del mensaje original sin agregar información inventada.
+4. Devuelve ÚNICAMENTE el texto corregido.
+
+Texto en bruto:
+"{transcripcion_bruta}"
+"""
+                    res_corr = client.chat.completions.create(
+                        model="llama3-8b-8192",
+                        messages=[
+                            {"role": "user", "content": prompt_correccion}
+                        ],
+                        temperature=0.2,
+                    )
+                    transcripcion_pulida = (
+                        res_corr.choices[0].message.content.strip()
+                    )
+
+                    # 4. Extracción de Nombre del Paciente desde la transcripción corregida
+                    status.write("🧠 Identificando paciente...")
                     nombre_paciente = "Paciente Desconocido"
                     try:
-                        prompt_json = (
-                            "Eres un asistente médico. Identifica y extrae el"
-                            " NOMBRE COMPLETO del paciente mencionado en el"
-                            ' dictado. Responde ÚNICAMENTE un JSON: {"paciente":'
-                            ' "Nombre Apellido"}. Si no hay nombre, usa'
-                            ' {"paciente": "Paciente Desconocido"}.'
-                            f" Dictado: {transcripcion}"
-                        )
+                        prompt_json = f"""
+Extrae el NOMBRE COMPLETO del paciente mencionado en este dictado médico.
+Responde ÚNICAMENTE en JSON con la clave "paciente".
+Ejemplo: {{"paciente": "Santiago Celac"}}
 
-                        res = client.chat.completions.create(
+Dictado: "{transcripcion_pulida}"
+"""
+                        res_json = client.chat.completions.create(
                             model="llama3-8b-8192",
-                            messages=[{"role": "user", "content": prompt_json}],
+                            messages=[
+                                {"role": "user", "content": prompt_json}
+                            ],
                             response_format={"type": "json_object"},
                             temperature=0.1,
                         )
-                        parsed = json.loads(res.choices[0].message.content)
-                        nombre_paciente = parsed.get(
-                            "paciente", "Paciente Desconocido"
-                        ).strip()
-
+                        nombre_paciente = (
+                            json.loads(res_json.choices[0].message.content)
+                            .get("paciente", "Paciente Desconocido")
+                            .strip()
+                        )
                     except Exception:
                         pass
 
-                    # Fallback por expresiones regulares si el JSON devolvió valor genérico
+                    # Respaldar por expresión regular si el JSON no capturó
                     if (
                         nombre_paciente == "Paciente Desconocido"
                         or not nombre_paciente
                     ):
                         match = re.search(
-                            r"paciente\s+([A-ZÁÉÍÓÚÑa-záléíóúñ\s]{3,30})(?:,|\s+del|\s+con|\s+de)",
-                            transcripcion,
+                            r"paciente\s+([A-ZÁÉÍÓÚÑa-záléíóúñ\s]{3,35})(?:,|\s+del|\s+con|\s+de|\s+en)",
+                            transcripcion_pulida,
                             re.IGNORECASE,
                         )
                         if match:
                             nombre_paciente = match.group(1).strip().title()
 
-                    # 4. Guardar archivo en Supabase Storage con Nombre de Paciente y Fecha/Hora
-                    status.write("☁️ Guardando audio en la nube...")
-                    nombre_limpio = re.sub(r"[^\w\s-]", "", nombre_paciente).replace(" ", "_")
+                    # 5. Guardar audio en Supabase Storage
+                    status.write("☁️ Guardando audio en Supabase Storage...")
+                    nombre_limpio = re.sub(
+                        r"[^\w\s-]", "", nombre_paciente
+                    ).replace(" ", "_")
                     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
                     file_name = f"{timestamp_str}_{nombre_limpio}.{ext}"
 
@@ -145,11 +173,11 @@ if rol == "👨‍⚕️ Vista Médico":
                         "audios"
                     ).get_public_url(file_name)
 
-                    # 5. Insertar en Base de Datos
-                    status.write("💾 Registrando informe...")
+                    # 6. Registrar en Base de Datos
+                    status.write("💾 Registrando en la base de datos...")
                     supabase.table("informes").insert({
                         "paciente": nombre_paciente,
-                        "transcripcion": transcripcion,
+                        "transcripcion": transcripcion_pulida,
                         "audio_url": audio_url,
                     }).execute()
 
@@ -159,12 +187,12 @@ if rol == "👨‍⚕️ Vista Médico":
                         expanded=False,
                     )
                     st.success(
-                        f"¡Informe registrado para **{nombre_paciente}**!"
+                        f"¡Informe guardado y corregido para **{nombre_paciente}**!"
                     )
 
                 except Exception as e:
                     status.update(label="❌ Ocurrió un error", state="error")
-                    st.error(f"Detalle técnico: {e}")
+                    st.error(f"Detalle técnico del fallo: {e}")
 
 # =========================================================
 # VISTA SECRETARIA
@@ -183,7 +211,6 @@ elif rol == "👩‍💼 Vista Secretaria":
         if not datos:
             st.info("No hay informes registrados aún.")
         else:
-            # Desplegable con Paciente + Fecha y Hora exacta
             opciones = [
                 f"👤 {d['paciente']} — 📅 {formatear_fecha(d['created_at'])}"
                 for d in datos
@@ -200,7 +227,7 @@ elif rol == "👩‍💼 Vista Secretaria":
             col1, col2 = st.columns(2)
             with col1:
                 st.text_area(
-                    "Transcripción del Dictado:",
+                    "Transcripción Clínica (Optimizada por IA):",
                     informe["transcripcion"],
                     height=250,
                 )
