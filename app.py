@@ -72,7 +72,7 @@ if rol == "👨‍⚕️ Vista Médico":
                     )
                     buffer_audio.name = f"dictado.{ext}"
 
-                    # 2. Transcripción inicial con Whisper
+                    # 2. Transcripción inicial con Whisper Large v3
                     status.write("🎙️ Transcribiendo audio con Whisper...")
                     transcripcion_bruta = client.audio.transcriptions.create(
                         model="whisper-large-v3",
@@ -86,9 +86,9 @@ if rol == "👨‍⚕️ Vista Médico":
                         ),
                     ).text
 
-                    # 3. Corrección Clínica por Inteligencia Artificial (Llama)
+                    # 3. Corrección Clínica por Llama 3.3 Versatile (Modelo Actualizado)
                     status.write(
-                        "🩺 Aplicando corrección de términos médicos..."
+                        "🩺 Aplicando corrección de términos médicos con IA..."
                     )
                     prompt_correccion = f"""
 Eres un editor y transcriptor médico experto. Corrige y perfecciona la siguiente transcripción en bruto provista por un reconocedor de voz.
@@ -103,7 +103,7 @@ Texto en bruto:
 "{transcripcion_bruta}"
 """
                     res_corr = client.chat.completions.create(
-                        model="llama3-8b-8192",
+                        model="llama-3.3-70b-versatile",
                         messages=[
                             {"role": "user", "content": prompt_correccion}
                         ],
@@ -113,7 +113,7 @@ Texto en bruto:
                         res_corr.choices[0].message.content.strip()
                     )
 
-                    # 4. Extracción de Nombre del Paciente desde la transcripción corregida
+                    # 4. Extracción de Nombre del Paciente
                     status.write("🧠 Identificando paciente...")
                     nombre_paciente = "Paciente Desconocido"
                     try:
@@ -125,7 +125,7 @@ Ejemplo: {{"paciente": "Santiago Celac"}}
 Dictado: "{transcripcion_pulida}"
 """
                         res_json = client.chat.completions.create(
-                            model="llama3-8b-8192",
+                            model="llama-3.3-70b-versatile",
                             messages=[
                                 {"role": "user", "content": prompt_json}
                             ],
@@ -140,7 +140,7 @@ Dictado: "{transcripcion_pulida}"
                     except Exception:
                         pass
 
-                    # Respaldar por expresión regular si el JSON no capturó
+                    # Respaldar por expresión regular
                     if (
                         nombre_paciente == "Paciente Desconocido"
                         or not nombre_paciente
