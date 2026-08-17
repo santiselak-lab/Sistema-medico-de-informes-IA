@@ -7,13 +7,12 @@ import streamlit as st
 
 st.set_page_config(page_title="Sistema Médico", layout="wide")
 
-# Lectura de credenciales
+# Lectura de credenciales desde Secrets
 try:
     groq_key = st.secrets["GROQ_API_KEY"]
     supabase_url = st.secrets["SUPABASE_URL"]
     supabase_key = st.secrets["SUPABASE_KEY"]
 
-    # Conexión al motor gratuito de Groq usando la misma librería de OpenAI
     client = OpenAI(
         base_url="https://api.groq.com/openai/v1", api_key=groq_key
     )
@@ -52,7 +51,7 @@ if rol == "👨‍⚕️ Vista Médico":
                     buffer_audio = io.BytesIO(audio_bytes)
                     buffer_audio.name = "dictado.m4a"
 
-                    # 2. Transcripción con Whisper Large v3 (Gratis en Groq)
+                    # 2. Transcripción con Whisper Large v3 (Groq Gratis)
                     status.write("🎙️ Transcribiendo audio con Whisper...")
                     transcripcion = client.audio.transcriptions.create(
                         model="whisper-large-v3",
@@ -60,11 +59,11 @@ if rol == "👨‍⚕️ Vista Médico":
                         language="es",
                     ).text
 
-                    # 3. Extracción de nombre de paciente con Llama 3.1 (Gratis en Groq)
+                    # 3. Extracción de datos con Llama 3.3 70B (Groq Gratis)
                     status.write("🧠 Extrayendo nombre del paciente...")
                     prompt = f'Extrae el nombre del paciente del siguiente texto. Devuelve un JSON estricto con la clave "paciente". Texto: {transcripcion}'
                     res = client.chat.completions.create(
-                        model="llama-3.1-8b-instant",
+                        model="llama-3.3-70b-versatile",
                         messages=[{"role": "user", "content": prompt}],
                         response_format={"type": "json_object"},
                     )
@@ -72,7 +71,7 @@ if rol == "👨‍⚕️ Vista Médico":
                         res.choices[0].message.content
                     ).get("paciente", "Paciente Desconocido")
 
-                    # 4. Subir audio a Supabase Storage
+                    # 4. Guardar audio en Supabase Storage
                     status.write("☁️ Guardando audio en Supabase...")
                     file_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_dictado.wav"
 
@@ -88,7 +87,7 @@ if rol == "👨‍⚕️ Vista Médico":
                         "audios"
                     ).get_public_url(file_name)
 
-                    # 5. Guardar en base de datos
+                    # 5. Guardar registro en la base de datos
                     status.write("💾 Registrando informe en la base de datos...")
                     supabase.table("informes").insert({
                         "paciente": nombre_paciente,
