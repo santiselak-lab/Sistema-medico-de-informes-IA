@@ -86,7 +86,7 @@ if rol == "👨‍⚕️ Vista Médico":
                         ),
                     ).text
 
-                    # 3. Corrección Clínica por Llama 3.3 Versatile (Modelo Actualizado)
+                    # 3. Corrección Clínica por Llama 3.1 Instant
                     status.write(
                         "🩺 Aplicando corrección de términos médicos con IA..."
                     )
@@ -103,7 +103,7 @@ Texto en bruto:
 "{transcripcion_bruta}"
 """
                     res_corr = client.chat.completions.create(
-                        model="llama-3.3-70b-versatile",
+                        model="llama-3.1-8b-instant",
                         messages=[
                             {"role": "user", "content": prompt_correccion}
                         ],
@@ -125,7 +125,7 @@ Ejemplo: {{"paciente": "Santiago Celac"}}
 Dictado: "{transcripcion_pulida}"
 """
                         res_json = client.chat.completions.create(
-                            model="llama-3.3-70b-versatile",
+                            model="llama-3.1-8b-instant",
                             messages=[
                                 {"role": "user", "content": prompt_json}
                             ],
@@ -140,7 +140,7 @@ Dictado: "{transcripcion_pulida}"
                     except Exception:
                         pass
 
-                    # Respaldar por expresión regular
+                    # Respaldar por expresión regular si no capturó
                     if (
                         nombre_paciente == "Paciente Desconocido"
                         or not nombre_paciente
