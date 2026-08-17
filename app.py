@@ -3,6 +3,7 @@ import json
 import streamlit as st
 from datetime import datetime
 from openai import OpenAI
+from st_audiorec import st_audiorec
 
 # ---------------------------------------------------------
 # CONFIGURACIÓN INICIAL Y CARPETAS
@@ -18,16 +19,14 @@ for carpeta in [AUDIOS_DIR, TEXTOS_DIR, IMAGENES_DIR]:
     os.makedirs(carpeta, exist_ok=True)
 
 # ---------------------------------------------------------
-# AUTENTICACIÓN / API KEY DE OPENAI
+# AUTENTICACIÓN / API KEY
 # ---------------------------------------------------------
-# Puedes colocar tu API key aquí o ingresarla en la barra lateral
 api_key = st.sidebar.text_input("OpenAI API Key", type="password")
 
 # ---------------------------------------------------------
-# FUNCIONES DE INTELIGENCIA ARTIFICIAL
+# FUNCIONES DE IA
 # ---------------------------------------------------------
 def procesar_audio_medico(ruta_audio, client):
-    # 1. Transcripción con Whisper
     with open(ruta_audio, "rb") as audio_file:
         transcripcion = client.audio.transcriptions.create(
             model="whisper-1", 
@@ -35,7 +34,6 @@ def procesar_audio_medico(ruta_audio, client):
             language="es"
         ).text
 
-    # 2. Extracción del nombre del paciente usando GPT
     prompt = f"""
     Extrae el nombre y apellido del paciente del siguiente texto médico.
     Devuelve ÚNICAMENTE un JSON con el formato: {{"paciente": "Nombre Apellido"}}
@@ -66,35 +64,51 @@ rol = st.sidebar.radio("Selecciona tu Rol:", ["👨‍⚕️ Vista Médico", "�
 # =========================================================
 if rol == "👨‍⚕️ Vista Médico":
     st.title("👨‍⚕️ Captura de Audio Médico")
-    st.info("Graba o sube el audio mencionando el nombre del paciente y los detalles del dictado.")
+    st.info("Presiona el botón para grabar o adjunta un archivo existente.")
 
-    audio_file = st.file_uploader("Subir dictado de audio (.mp3, .m4a, .wav)", type=["mp3", "m4a", "wav"])
+    tab1, tab2 = st.tabs(["🎙️ Grabar Audio Directo", "📁 Subir Archivo"])
 
-    if audio_file and st.button("🚀 Procesar y Enviar a Secretaría"):
-        if not api_key:
-            st.error("Por favor ingresa tu OpenAI API Key en la barra lateral.")
-        else:
-            client = OpenAI(api_key=api_key)
-            with st.spinner("Procesando audio y extrayendo datos..."):
-                # Guardar audio temporalmente
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                temp_path = os.path.join(AUDIOS_DIR, f"temp_{timestamp}.mp3")
-                with open(temp_path, "wb") as f:
-                    f.write(audio_file.read())
+    audio_bytes = None
 
-                # Transcribir y extraer nombre
-                texto, nombre_paciente = procesar_audio_medico(temp_path, client)
+    with tab1:
+        st.subheader("Grabar Dictado")
+        audio_bytes = st_audiorec()
 
-                # Renombrar archivos con el nombre del paciente
-                nombre_base = f"{nombre_paciente}_{timestamp}"
-                ruta_audio_final = os.path.join(AUDIOS_DIR, f"{nombre_base}.mp3")
-                ruta_texto_final = os.path.join(TEXTOS_DIR, f"{nombre_base}.txt")
+    with tab2:
+        st.subheader("Subir Archivo de Audio")
+        uploaded_file = st.file_uploader("Formataos (.mp3, .m4a, .wav)", type=["mp3", "m4a", "wav"])
+        if uploaded_file:
+            audio_bytes = uploaded_file.read()
 
-                os.rename(temp_path, ruta_audio_final)
-                with open(ruta_texto_final, "w", encoding="utf-8") as f:
-                    f.write(texto)
+    st.write("---")
+    
+    # BOTÓN GRANDE DE PROCESAMIENTO
+    if audio_bytes is not None:
+        st.audio(audio_bytes, format="audio/wav")
+        
+        if st.button("🚀 PROCESAR Y ENVIAR INFORME", type="primary", use_container_width=True):
+            if not api_key:
+                st.error("⚠️ Ingresa tu OpenAI API Key en la barra lateral para procesar.")
+            else:
+                client = OpenAI(api_key=api_key)
+                with st.spinner("Transcribiendo y extrayendo expediente del paciente..."):
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    temp_path = os.path.join(AUDIOS_DIR, f"temp_{timestamp}.wav")
+                    
+                    with open(temp_path, "wb") as f:
+                        f.write(audio_bytes)
 
-                st.success(f"✅ ¡Informe enviado! Guardado para el paciente: **{nombre_paciente.replace('_', ' ')}**")
+                    texto, nombre_paciente = procesar_audio_medico(temp_path, client)
+
+                    nombre_base = f"{nombre_paciente}_{timestamp}"
+                    ruta_audio_final = os.path.join(AUDIOS_DIR, f"{nombre_base}.wav")
+                    ruta_texto_final = os.path.join(TEXTOS_DIR, f"{nombre_base}.txt")
+
+                    os.rename(temp_path, ruta_audio_final)
+                    with open(ruta_texto_final, "w", encoding="utf-8") as f:
+                        f.write(texto)
+
+                    st.success(f"✅ Informe guardado para: **{nombre_paciente.replace('_', ' ')}**")
 
 # =========================================================
 # VISTA SECRETARIA
@@ -102,7 +116,6 @@ if rol == "👨‍⚕️ Vista Médico":
 elif rol == "👩‍💼 Vista Secretaria":
     st.title("👩‍💼 Panel de Gestión de Informes")
 
-    # Obtener lista de informes disponibles
     archivos_texto = [f for f in os.listdir(TEXTOS_DIR) if f.endswith(".txt")]
 
     if not archivos_texto:
@@ -110,34 +123,29 @@ elif rol == "👩‍💼 Vista Secretaria":
     else:
         st.subheader("📁 Portafolio de Pacientes")
         
-        # Selección de informe / paciente
         informe_sel = st.selectbox("Selecciona un informe:", archivos_texto)
         nombre_base = informe_sel.replace(".txt", "")
         paciente_nombre = nombre_base.split("_")[0] + " " + nombre_base.split("_")[1]
 
         st.markdown(f"### 👤 Paciente: **{paciente_nombre}**")
 
-        # Layout en dos columnas: Texto vs Imágenes
         col1, col2 = st.columns(2)
 
         with col1:
             st.subheader("📝 Transcripción del Dictado")
             
-            # Cargar texto
             with open(os.path.join(TEXTOS_DIR, informe_sel), "r", encoding="utf-8") as f:
                 contenido_texto = f.read()
             
             st.text_area("Texto transcrito:", contenido_texto, height=250)
 
-            # Cargar y reproducir audio original
-            ruta_audio = os.path.join(AUDIOS_DIR, f"{nombre_base}.mp3")
+            ruta_audio = os.path.join(AUDIOS_DIR, f"{nombre_base}.wav")
             if os.path.exists(ruta_audio):
                 st.audio(ruta_audio)
 
         with col2:
             st.subheader("🖼️ Diagnóstico por Imágenes")
             
-            # Subir imágenes para este paciente
             imgs_subidas = st.file_uploader(
                 f"Adjuntar imágenes para {paciente_nombre}", 
                 type=["png", "jpg", "jpeg"], 
@@ -151,7 +159,6 @@ elif rol == "👩‍💼 Vista Secretaria":
                         f.write(img.read())
                 st.success("Imágenes guardadas correctamente.")
 
-            # Mostrar imágenes guardadas
             st.write("**Imágenes asociadas:**")
             imgs_guardadas = [f for f in os.listdir(IMAGENES_DIR) if f.startswith(nombre_base)]
             for img_name in imgs_guardadas:
