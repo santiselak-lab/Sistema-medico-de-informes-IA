@@ -23,6 +23,30 @@ except Exception as e:
     st.stop()
 
 
+def obtener_modelo_chat_activo():
+    """Detecta dinámicamente los modelos disponibles en Groq para evitar errores 404."""
+    modelos_preferidos = [
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "llama3-70b-8192",
+        "llama3-8b-8192",
+        "mixtral-8x7b-32768",
+        "gemma2-9b-it",
+    ]
+    try:
+        modelos_disponibles = [m.id for m in client.models.list().data]
+        for m in modelos_preferidos:
+            if m in modelos_disponibles:
+                return m
+        # Si ninguno de la lista preferida coincide, tomar el primer modelo de chat disponible
+        for m in modelos_disponibles:
+            if "whisper" not in m:
+                return m
+    except Exception:
+        pass
+    return "llama-3.1-8b-instant"
+
+
 def formatear_fecha(iso_str):
     """Convierte fecha ISO de Supabase a formato 'DD/MM/YYYY HH:MM hrs'"""
     try:
@@ -72,7 +96,7 @@ if rol == "👨‍⚕️ Vista Médico":
                     )
                     buffer_audio.name = f"dictado.{ext}"
 
-                    # 2. Transcripción inicial con Whisper Large v3
+                    # 2. Transcripción con Whisper Large v3
                     status.write("🎙️ Transcribiendo audio con Whisper...")
                     transcripcion_bruta = client.audio.transcriptions.create(
                         model="whisper-large-v3",
@@ -86,11 +110,16 @@ if rol == "👨‍⚕️ Vista Médico":
                         ),
                     ).text
 
-                    # 3. Corrección Clínica por Llama 3.1 Instant
+                    # 3. Identificación del modelo activo y corrección
+                    modelo_activo = obtener_modelo_chat_activo()
                     status.write(
-                        "🩺 Aplicando corrección de términos médicos con IA..."
+                        f"🩺 Optimizando texto médico (Modelo:"
+                        f" {modelo_activo})..."
                     )
-                    prompt_correccion = f"""
+
+                    transcripcion_pulida = transcripcion_bruta
+                    try:
+                        prompt_correccion = f"""
 Eres un editor y transcriptor médico experto. Corrige y perfecciona la siguiente transcripción en bruto provista por un reconocedor de voz.
 
 Instrucciones:
@@ -102,20 +131,26 @@ Instrucciones:
 Texto en bruto:
 "{transcripcion_bruta}"
 """
-                    res_corr = client.chat.completions.create(
-                        model="llama-3.1-8b-instant",
-                        messages=[
-                            {"role": "user", "content": prompt_correccion}
-                        ],
-                        temperature=0.2,
-                    )
-                    transcripcion_pulida = (
-                        res_corr.choices[0].message.content.strip()
-                    )
+                        res_corr = client.chat.completions.create(
+                            model=modelo_activo,
+                            messages=[
+                                {"role": "user", "content": prompt_correccion}
+                            ],
+                            temperature=0.2,
+                        )
+                        transcripcion_pulida = (
+                            res_corr.choices[0].message.content.strip()
+                        )
+                    except Exception as err_llm:
+                        status.write(
+                            "⚠️ Aviso: Usando transcripción directa de Whisper"
+                            " por contingencia."
+                        )
 
                     # 4. Extracción de Nombre del Paciente
                     status.write("🧠 Identificando paciente...")
                     nombre_paciente = "Paciente Desconocido"
+
                     try:
                         prompt_json = f"""
 Extrae el NOMBRE COMPLETO del paciente mencionado en este dictado médico.
@@ -125,7 +160,7 @@ Ejemplo: {{"paciente": "Santiago Celac"}}
 Dictado: "{transcripcion_pulida}"
 """
                         res_json = client.chat.completions.create(
-                            model="llama-3.1-8b-instant",
+                            model=modelo_activo,
                             messages=[
                                 {"role": "user", "content": prompt_json}
                             ],
@@ -140,7 +175,7 @@ Dictado: "{transcripcion_pulida}"
                     except Exception:
                         pass
 
-                    # Respaldar por expresión regular si no capturó
+                    # Respaldo con Expresión Regular si falla la extracción JSON
                     if (
                         nombre_paciente == "Paciente Desconocido"
                         or not nombre_paciente
@@ -187,7 +222,7 @@ Dictado: "{transcripcion_pulida}"
                         expanded=False,
                     )
                     st.success(
-                        f"¡Informe guardado y corregido para **{nombre_paciente}**!"
+                        f"¡Informe registrado para **{nombre_paciente}**!"
                     )
 
                 except Exception as e:
