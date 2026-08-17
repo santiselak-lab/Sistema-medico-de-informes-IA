@@ -1,13 +1,14 @@
 from datetime import datetime
 import io
 import json
+import re
 from openai import OpenAI
 from supabase import create_client
 import streamlit as st
 
 st.set_page_config(page_title="Sistema Médico", layout="wide")
 
-# Lectura de credenciales desde Secrets
+# Lectura de credenciales
 try:
     groq_key = st.secrets["GROQ_API_KEY"]
     supabase_url = st.secrets["SUPABASE_URL"]
@@ -21,6 +22,16 @@ except Exception as e:
     st.error("⚠️ Revisa las credenciales en 'Secrets' de Streamlit Cloud.")
     st.stop()
 
+
+def formatear_fecha(iso_str):
+    """Convierte fecha ISO de Supabase a formato 'DD/MM/YYYY HH:MM hrs'"""
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        return dt.strftime("%d/%m/%Y %H:%M hrs")
+    except Exception:
+        return iso_str[:16]
+
+
 st.sidebar.title("🏥 Menú del Sistema")
 rol = st.sidebar.radio(
     "Selecciona tu Rol:", ["👨‍⚕️ Vista Médico", "👩‍💼 Vista Secretaria"]
@@ -32,16 +43,12 @@ rol = st.sidebar.radio(
 if rol == "👨‍⚕️ Vista Médico":
     st.title("👨‍⚕️ Captura de Audio Médico")
 
-    # Opción 1: Grabar con micrófono del navegador
     audio_grabado = st.audio_input("🎙️ Opción A: Grabar dictado en vivo")
-
-    # Opción 2: Subir archivo HD grabado previamente en el celular
     audio_subido = st.file_uploader(
         "📁 Opción B: Subir nota de voz HD (.m4a, .mp3, .wav)",
         type=["m4a", "mp3", "wav"],
     )
 
-    # Determinar cuál audio utilizar
     audio_data = audio_grabado if audio_grabado is not None else audio_subido
 
     if audio_data is not None:
@@ -54,7 +61,7 @@ if rol == "👨‍⚕️ Vista Médico":
                 "Procesando dictado médico...", expanded=True
             ) as status:
                 try:
-                    # 1. Lectura del buffer de audio
+                    # 1. Preparar audio
                     status.write("⏳ Leyendo archivo de audio...")
                     audio_bytes = audio_data.getvalue()
                     buffer_audio = io.BytesIO(audio_bytes)
@@ -65,7 +72,7 @@ if rol == "👨‍⚕️ Vista Médico":
                     )
                     buffer_audio.name = f"dictado.{ext}"
 
-                    # 2. Transcripción con Prompt Clínico de Alta Precisión
+                    # 2. Transcripción con Whisper Large v3
                     status.write(
                         "🎙️ Transcribiendo audio con Whisper (Modo Médico)..."
                     )
@@ -74,39 +81,58 @@ if rol == "👨‍⚕️ Vista Médico":
                         file=buffer_audio,
                         language="es",
                         prompt=(
-                            "Dictado médico clínico formal. Contiene nombres de"
-                            " pacientes, términos anatómicos, síntomas,"
-                            " diagnóstico, fosa ilíaca, exploración física,"
-                            " medicamentos y posología."
+                            "Dictado clínico formal. Incluye nombre del"
+                            " paciente, expediente, diagnóstico, anatomía y"
+                            " tratamiento."
                         ),
                     ).text
 
-                    # 3. Extracción de Nombre del Paciente con Llama 3
-                    status.write("🧠 Extrayendo datos del paciente...")
+                    # 3. Extracción de Nombre de Paciente
+                    status.write("🧠 Extrayendo nombre del paciente...")
                     nombre_paciente = "Paciente Desconocido"
                     try:
                         prompt_json = (
-                            "Extrae únicamente el nombre completo del paciente"
-                            " del siguiente dictado médico. Devuelve formato"
-                            " JSON estricto: {\"paciente\": \"Nombre"
-                            ' Apellido"}. Si no se menciona ningún nombre,'
-                            ' devuelve {"paciente": "Paciente Desconocido"}.'
-                            f" Texto: {transcripcion}"
+                            "Eres un asistente médico. Identifica y extrae el"
+                            " NOMBRE COMPLETO del paciente mencionado en el"
+                            ' dictado. Responde ÚNICAMENTE un JSON: {"paciente":'
+                            ' "Nombre Apellido"}. Si no hay nombre, usa'
+                            ' {"paciente": "Paciente Desconocido"}.'
+                            f" Dictado: {transcripcion}"
                         )
+
                         res = client.chat.completions.create(
                             model="llama3-8b-8192",
                             messages=[{"role": "user", "content": prompt_json}],
                             response_format={"type": "json_object"},
+                            temperature=0.1,
                         )
-                        nombre_paciente = json.loads(
-                            res.choices[0].message.content
-                        ).get("paciente", "Paciente Desconocido")
-                    except Exception:
-                        nombre_paciente = "Paciente (Revisar dictado)"
+                        parsed = json.loads(res.choices[0].message.content)
+                        nombre_paciente = parsed.get(
+                            "paciente", "Paciente Desconocido"
+                        ).strip()
 
-                    # 4. Guardar archivo en Supabase Storage
+                    except Exception:
+                        pass
+
+                    # Fallback por expresiones regulares si el JSON devolvió valor genérico
+                    if (
+                        nombre_paciente == "Paciente Desconocido"
+                        or not nombre_paciente
+                    ):
+                        match = re.search(
+                            r"paciente\s+([A-ZÁÉÍÓÚÑa-záléíóúñ\s]{3,30})(?:,|\s+del|\s+con|\s+de)",
+                            transcripcion,
+                            re.IGNORECASE,
+                        )
+                        if match:
+                            nombre_paciente = match.group(1).strip().title()
+
+                    # 4. Guardar archivo en Supabase Storage con Nombre de Paciente y Fecha/Hora
                     status.write("☁️ Guardando audio en la nube...")
-                    file_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_dictado.{ext}"
+                    nombre_limpio = re.sub(r"[^\w\s-]", "", nombre_paciente).replace(" ", "_")
+                    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    file_name = f"{timestamp_str}_{nombre_limpio}.{ext}"
+
                     supabase.storage.from_("audios").upload(
                         file_name,
                         audio_bytes,
@@ -119,8 +145,8 @@ if rol == "👨‍⚕️ Vista Médico":
                         "audios"
                     ).get_public_url(file_name)
 
-                    # 5. Insertar informe en la Base de Datos
-                    status.write("💾 Guardando informe...")
+                    # 5. Insertar en Base de Datos
+                    status.write("💾 Registrando informe...")
                     supabase.table("informes").insert({
                         "paciente": nombre_paciente,
                         "transcripcion": transcripcion,
@@ -133,12 +159,12 @@ if rol == "👨‍⚕️ Vista Médico":
                         expanded=False,
                     )
                     st.success(
-                        f"¡Informe guardado correctamente para **{nombre_paciente}**!"
+                        f"¡Informe registrado para **{nombre_paciente}**!"
                     )
 
                 except Exception as e:
                     status.update(label="❌ Ocurrió un error", state="error")
-                    st.error(f"Detalle técnico del fallo: {e}")
+                    st.error(f"Detalle técnico: {e}")
 
 # =========================================================
 # VISTA SECRETARIA
@@ -157,14 +183,20 @@ elif rol == "👩‍💼 Vista Secretaria":
         if not datos:
             st.info("No hay informes registrados aún.")
         else:
+            # Desplegable con Paciente + Fecha y Hora exacta
             opciones = [
-                f"{d['paciente']} - {d['created_at'][:10]}" for d in datos
+                f"👤 {d['paciente']} — 📅 {formatear_fecha(d['created_at'])}"
+                for d in datos
             ]
             seleccion = st.selectbox("Seleccionar expediente:", opciones)
             idx = opciones.index(seleccion)
             informe = datos[idx]
 
             st.markdown(f"### 👤 Paciente: **{informe['paciente']}**")
+            st.caption(
+                f"🕒 Registrado el: {formatear_fecha(informe['created_at'])}"
+            )
+
             col1, col2 = st.columns(2)
             with col1:
                 st.text_area(
