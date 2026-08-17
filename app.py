@@ -51,7 +51,7 @@ if rol == "👨‍⚕️ Vista Médico":
                     buffer_audio = io.BytesIO(audio_bytes)
                     buffer_audio.name = "dictado.m4a"
 
-                    # 2. Transcripción con Whisper Large v3 (Groq Gratis)
+                    # 2. Transcripción con Whisper Large v3
                     status.write("🎙️ Transcribiendo audio con Whisper...")
                     transcripcion = client.audio.transcriptions.create(
                         model="whisper-large-v3",
@@ -59,17 +59,22 @@ if rol == "👨‍⚕️ Vista Médico":
                         language="es",
                     ).text
 
-                    # 3. Extracción de datos con Llama 3.3 70B (Groq Gratis)
+                    # 3. Extracción de nombre (con fallback blindado)
                     status.write("🧠 Extrayendo nombre del paciente...")
-                    prompt = f'Extrae el nombre del paciente del siguiente texto. Devuelve un JSON estricto con la clave "paciente". Texto: {transcripcion}'
-                    res = client.chat.completions.create(
-                        model="llama-3.3-70b-versatile",
-                        messages=[{"role": "user", "content": prompt}],
-                        response_format={"type": "json_object"},
-                    )
-                    nombre_paciente = json.loads(
-                        res.choices[0].message.content
-                    ).get("paciente", "Paciente Desconocido")
+                    nombre_paciente = "Paciente Desconocido"
+                    try:
+                        prompt = f'Extrae únicamente el nombre completo del paciente del texto. Responde en formato JSON exacto: {{"paciente": "Nombre Apellido"}}. Texto: {transcripcion}'
+                        res = client.chat.completions.create(
+                            model="llama3-8b-8192",
+                            messages=[{"role": "user", "content": prompt}],
+                            response_format={"type": "json_object"},
+                        )
+                        nombre_paciente = json.loads(
+                            res.choices[0].message.content
+                        ).get("paciente", "Paciente Desconocido")
+                    except Exception:
+                        # Si el modelo de texto falla por cualquier motivo, no bloquea el guardado
+                        nombre_paciente = "Paciente (Revisar dictado)"
 
                     # 4. Guardar audio en Supabase Storage
                     status.write("☁️ Guardando audio en Supabase...")
