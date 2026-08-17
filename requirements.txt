@@ -1,3 +1,5 @@
 streamlit
 openai
 pydantic
+st-audiorec
+supabase
