@@ -1,85 +1,103 @@
-import os
-import json
 import streamlit as st
+import json
 from datetime import datetime
 from openai import OpenAI
+from supabase import create_client
+
+st.set_page_config(page_title="Sistema Médico Nube", layout="wide")
 
 # ---------------------------------------------------------
-# CONFIGURACIÓN INICIAL
+# CREDENCIALES EN BARRA LATERAL
 # ---------------------------------------------------------
-st.set_page_config(page_title="Sistema de Informes Médicos", layout="wide")
+st.sidebar.title("🔑 Configuración")
+openai_key = st.sidebar.text_input("OpenAI API Key", type="password")
+supabase_url = st.sidebar.text_input("Supabase URL")
+supabase_key = st.sidebar.text_input("Supabase Anon Key", type="password")
 
-BASE_DIR = "datos_medicos"
-AUDIOS_DIR = os.path.join(BASE_DIR, "audios")
-TEXTOS_DIR = os.path.join(BASE_DIR, "textos")
-IMAGENES_DIR = os.path.join(BASE_DIR, "imagenes")
+# Inicializar Supabase si hay credenciales
+supabase = None
+if supabase_url and supabase_key:
+    supabase = create_client(supabase_url, supabase_key)
 
-for carpeta in [AUDIOS_DIR, TEXTOS_DIR, IMAGENES_DIR]:
-    os.makedirs(carpeta, exist_ok=True)
-
-api_key = st.sidebar.text_input("OpenAI API Key", type="password")
-
-def procesar_audio_medico(ruta_audio, client):
-    with open(ruta_audio, "rb") as audio_file:
-        transcripcion = client.audio.transcriptions.create(
-            model="whisper-1", 
-            file=audio_file,
-            language="es"
-        ).text
-
-    prompt = f"""
-    Extrae el nombre y apellido del paciente. Devuelve JSON: {{"paciente": "Nombre Apellido"}}
-    Texto: {transcripcion}
-    """
-    
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"}
-    )
-    
-    datos = json.loads(response.choices[0].message.content)
-    nombre_paciente = datos.get("paciente", "Paciente_Desconocido").replace(" ", "_")
-    return transcripcion, nombre_paciente
-
-# ---------------------------------------------------------
-# INTERFAZ
-# ---------------------------------------------------------
 st.sidebar.title("🏥 Menú del Sistema")
 rol = st.sidebar.radio("Selecciona tu Rol:", ["👨‍⚕️ Vista Médico", "👩‍💼 Vista Secretaria"])
 
+# =========================================================
+# VISTA MÉDICO
+# =========================================================
 if rol == "👨‍⚕️ Vista Médico":
     st.title("👨‍⚕️ Captura de Audio Médico")
     
-    # Usamos el Uploader nativo: al tocar "Upload" en Android,
-    # el sistema te permite elegir "Grabar" desde la grabadora del celular.
     audio_file = st.file_uploader("Grabar o subir dictado (.mp3, .m4a, .wav)", type=["mp3", "m4a", "wav"])
 
     if audio_file:
         st.audio(audio_file)
-        if st.button("🚀 PROCESAR Y ENVIAR INFORME", type="primary"):
-            if not api_key:
-                st.error("⚠️ Ingresa API Key.")
+        if st.button("🚀 ENVIAR A SECRETARÍA", type="primary"):
+            if not (openai_key and supabase):
+                st.error("⚠️ Falta ingresar las claves en la barra lateral.")
             else:
-                client = OpenAI(api_key=api_key)
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                temp_path = os.path.join(AUDIOS_DIR, f"temp_{timestamp}.wav")
-                
-                with open(temp_path, "wb") as f:
-                    f.write(audio_file.read())
+                client = OpenAI(api_key=openai_key)
+                with st.spinner("Procesando y subiendo a la nube..."):
+                    # 1. Transcribir
+                    audio_bytes = audio_file.read()
+                    transcripcion = client.audio.transcriptions.create(
+                        model="whisper-1", 
+                        file=(audio_file.name, audio_bytes),
+                        language="es"
+                    ).text
 
-                texto, nombre_paciente = procesar_audio_medico(temp_path, client)
-                ruta_final = os.path.join(TEXTOS_DIR, f"{nombre_paciente}_{timestamp}.txt")
-                with open(ruta_final, "w", encoding="utf-8") as f:
-                    f.write(texto)
-                st.success("✅ Informe enviado.")
+                    # 2. Extraer nombre
+                    prompt = f"Extrae el nombre del paciente. Devuelve JSON: {{\"paciente\": \"Nombre Apellido\"}}. Texto: {transcripcion}"
+                    res = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[{"role": "user", "content": prompt}],
+                        response_format={"type": "json_object"}
+                    )
+                    nombre_paciente = json.loads(res.choices[0].message.content).get("paciente", "Paciente Desconocido")
 
+                    # 3. Subir Audio a Supabase Storage
+                    file_path = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{audio_file.name}"
+                    supabase.storage.from_("audios").upload(file_path, audio_bytes, {"content-type": "audio/wav"})
+                    audio_url = supabase.storage.from_("audios").get_public_url(file_path)
+
+                    # 4. Guardar registro en Base de Datos
+                    supabase.table("informes").insert({
+                        "paciente": nombre_paciente,
+                        "transcripcion": transcripcion,
+                        "audio_url": audio_url
+                    }).execute()
+
+                    st.success(f"✅ ¡Informe guardado en la nube para {nombre_paciente}!")
+
+# =========================================================
+# VISTA SECRETARIA
+# =========================================================
 elif rol == "👩‍💼 Vista Secretaria":
-    st.title("👩‍💼 Gestión")
-    archivos = [f for f in os.listdir(TEXTOS_DIR) if f.endswith(".txt")]
-    if archivos:
-        sel = st.selectbox("Pacientes:", archivos)
-        with open(os.path.join(TEXTOS_DIR, sel), "r") as f:
-            st.text_area("Transcripción:", f.read())
+    st.title("👩‍💼 Panel de Gestión")
+
+    if not supabase:
+        st.warning("Ingresa las credenciales de Supabase en el menú lateral.")
     else:
-        st.info("Sin informes aún.")
+        # Consultar base de datos
+        datos = supabase.table("informes").select("*").order("created_at", desc=True).execute().data
+
+        if not datos:
+            st.info("No hay informes guardados aún.")
+        else:
+            opciones = [f"{d['id']} - {d['paciente']} ({d['created_at'][:10]})" for d in datos]
+            seleccion = st.selectbox("Selecciona un paciente:", opciones)
+            
+            # Buscar el registro seleccionado
+            idx = opciones.index(seleccion)
+            informe = datos[idx]
+
+            st.markdown(f"### 👤 Paciente: **{informe['paciente']}**")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.subheader("📝 Transcripción")
+                st.text_area("Texto:", informe['transcripcion'], height=250)
+            
+            with col2:
+                st.subheader("🔊 Audio Original")
+                st.audio(informe['audio_url'])
