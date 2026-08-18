@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 import io
 import json
 import re
+import unicodedata
 from docx import Document
 from openai import OpenAI
 from supabase import create_client
@@ -69,6 +70,17 @@ def generar_documento_word(paciente, fecha, transcripcion):
     doc.save(buffer)
     buffer.seek(0)
     return buffer
+
+
+def sanitizar_nombre_archivo(texto):
+    """Elimina acentos y caracteres especiales para evitar errores en Supabase Storage"""
+    texto_sin_acentos = (
+        unicodedata.normalize("NFKD", texto)
+        .encode("ASCII", "ignore")
+        .decode("utf-8")
+    )
+    limpio = re.sub(r"[^\w\s-]", "", texto_sin_acentos).strip().replace(" ", "_")
+    return limpio if limpio else "Archivo"
 
 
 st.sidebar.title("🏥 Sistema Médico")
@@ -187,9 +199,7 @@ Dictado: "{transcripcion_pulida}"
                             nombre_paciente = match.group(1).strip().title()
 
                     status.write("☁️ Guardando audio en Supabase...")
-                    nombre_limpio = re.sub(
-                        r"[^\w\s-]", "", nombre_paciente
-                    ).replace(" ", "_")
+                    nombre_limpio = sanitizar_nombre_archivo(nombre_paciente)
                     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
                     file_name = f"{timestamp_str}_{nombre_limpio}.{ext}"
 
@@ -323,10 +333,13 @@ elif rol == "👩‍💼 Vista Secretaria":
                     fecha_formateada,
                     informe_actual["transcripcion"],
                 )
+                nombre_doc_limpio = sanitizar_nombre_archivo(
+                    informe_actual["paciente"]
+                )
                 st.download_button(
                     label="📥 Descargar Informe en Word (.docx)",
                     data=word_file,
-                    file_name=f"Informe_{informe_actual['paciente'].replace(' ', '_')}_{informe_actual['id']}.docx",
+                    file_name=f"Informe_{nombre_doc_limpio}_{informe_actual['id']}.docx",
                     mime=(
                         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     ),
@@ -359,9 +372,8 @@ elif rol == "👩‍💼 Vista Secretaria":
                 for img in imagenes_subidas:
                     img_bytes = img.getvalue()
                     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    img_name = (
-                        f"img_{informe_actual['id']}_{timestamp_str}_{img.name}"
-                    )
+                    nombre_img_limpio = sanitizar_nombre_archivo(img.name)
+                    img_name = f"img_{informe_actual['id']}_{timestamp_str}_{nombre_img_limpio}"
 
                     supabase.storage.from_("audios").upload(
                         img_name,
