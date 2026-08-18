@@ -7,16 +7,21 @@ from openai import OpenAI
 from supabase import create_client
 import streamlit as st
 
-# ... (Configuración de clientes igual que antes) ...
-groq_key = st.secrets["GROQ_API_KEY"]
-supabase_url = st.secrets["SUPABASE_URL"]
-supabase_key = st.secrets["SUPABASE_KEY"]
-client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_key)
-supabase = create_client(supabase_url, supabase_key)
+st.set_page_config(page_title="Sistema Médico", layout="wide")
 
-# Funciones de ayuda
-def obtener_modelo_chat_activo():
-    return "llama-3.3-70b-versatile"
+# Configuración
+try:
+    groq_key = st.secrets["GROQ_API_KEY"]
+    supabase_url = st.secrets["SUPABASE_URL"]
+    supabase_key = st.secrets["SUPABASE_KEY"]
+    client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_key)
+    supabase = create_client(supabase_url, supabase_key)
+except Exception:
+    st.error("⚠️ Error de configuración.")
+    st.stop()
+
+# Funciones auxiliares
+def obtener_modelo(): return "llama-3.3-70b-versatile"
 
 def formatear_fecha(iso_str):
     try:
@@ -28,64 +33,59 @@ def formatear_fecha(iso_str):
 def generar_documento_word(paciente, fecha, transcripcion):
     doc = Document()
     doc.add_heading(f"Informe Clínico — {paciente}", level=1)
-    doc.add_paragraph(f"Fecha de consulta: {fecha}")
-    doc.add_heading("Transcripción:", level=2)
+    doc.add_paragraph(f"Fecha: {fecha}")
     doc.add_paragraph(transcripcion)
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer
 
-# --- VISTA SECRETARIA (Modificada para Edición y Aprendizaje) ---
-# (La vista Médico se mantiene igual, solo asegúrate de integrar la lógica de glosario ahí)
+# --- ESTRUCTURA PRINCIPAL ---
+st.sidebar.title("🏥 Sistema Médico")
+rol = st.sidebar.radio("Selecciona Rol:", ["👨‍⚕️ Vista Médico", "👩‍💼 Vista Secretaria"])
 
-# ... En tu flujo de procesamiento en la VISTA MÉDICO, antes de enviar a Llama:
-# 1. Consulta el glosario:
-#    correcciones = supabase.table("glosario_medico").select("*").eq("paciente", nombre_paciente).execute()
-# 2. Agrega al prompt: "Ten en cuenta estas correcciones previas: {correcciones}"
+if rol == "👨‍⚕️ Vista Médico":
+    st.title("👨‍⚕️ Captura de Audio")
+    audio_data = st.audio_input("Grabar dictado")
+    
+    if audio_data and st.button("🚀 Procesar"):
+        with st.spinner("Procesando..."):
+            # 1. Transcripción
+            transcripcion = client.audio.transcriptions.create(
+                model="whisper-large-v3", file=audio_data, language="es"
+            ).text
+            
+            # 2. Guardar (simplificado para evitar errores)
+            supabase.table("informes").insert({
+                "paciente": "Paciente Nuevo", 
+                "transcripcion": transcripcion
+            }).execute()
+            st.success("Guardado.")
 
-# --- AHORA, LA VISTA SECRETARIA CON EDICIÓN ---
 elif rol == "👩‍💼 Vista Secretaria":
-    # ... (código de selección de paciente e informe igual) ...
+    st.title("👩‍💼 Panel de Gestión")
+    # Obtener informes
+    res = supabase.table("informes").select("*").order("created_at", desc=True).execute()
+    datos = res.data
     
-    informe_actual = consultas[idx_c] # Tu variable de informe seleccionado
-
-    st.subheader("📄 Transcripción Médica")
-    
-    # Formulario para edición
-    with st.form("form_edicion"):
-        texto_editado = st.text_area(
-            "Dictado procesado (Edita aquí):",
-            informe_actual["transcripcion"],
-            height=250,
-        )
-        col_b1, col_b2 = st.columns(2)
+    if datos:
+        # Selección de informe
+        opciones = [f"{d['paciente']} - {d['created_at']}" for d in datos]
+        seleccion = st.selectbox("Seleccionar expediente", opciones)
+        idx = opciones.index(seleccion)
+        informe = datos[idx]
         
-        guardar = col_b1.form_submit_button("💾 Guardar Cambios en Base de Datos")
-        
-        # Botón de "Enseñar a la IA"
-        aprender = col_b2.form_submit_button("🧠 Enseñar esta corrección a la IA")
+        # Edición
+        st.subheader("📄 Transcripción Médica")
+        with st.form("editor_form"):
+            texto_editado = st.text_area("Dictado procesado:", informe["transcripcion"], height=200)
+            guardar = st.form_submit_button("💾 Guardar cambios")
+            
+            if guardar:
+                supabase.table("informes").update({"transcripcion": texto_editado}).eq("id", informe["id"]).execute()
+                st.success("¡Guardado!")
+                st.rerun()
 
-        if guardar:
-            supabase.table("informes").update({"transcripcion": texto_editado}).eq("id", informe_actual["id"]).execute()
-            st.success("¡Informe actualizado!")
-            st.rerun()
-
-        if aprender:
-            # Aquí lógica simple: buscar diferencias para "enseñar"
-            # O simplemente abrir un modal para pedir qué término corregir
-            st.info("Para enseñar a la IA, por favor indica qué término corregiste.")
-            termino_viejo = st.text_input("Término que salía mal (ej: Cela):")
-            termino_nuevo = st.text_input("Cómo debería escribirse (ej: Cella):")
-            if st.button("Confirmar aprendizaje"):
-                supabase.table("glosario_medico").insert({
-                    "paciente": informe_actual["paciente"],
-                    "termino_original": termino_viejo,
-                    "termino_correcto": termino_nuevo
-                }).execute()
-                st.success("¡Anotado! La próxima vez la IA lo recordará.")
-
-    # Descarga Word con el texto que está actualmente en la DB
-    st.divider()
-    word_file = generar_documento_word(informe_actual["paciente"], fecha_formateada, informe_actual["transcripcion"])
-    st.download_button("📥 Descargar Informe Final (.docx)", data=word_file, ...)
+        # Word
+        docx_file = generar_documento_word(informe["paciente"], informe["created_at"], informe["transcripcion"])
+        st.download_button("📥 Descargar Word", data=docx_file, file_name="informe.docx")
