@@ -139,27 +139,32 @@ if rol == "👨‍⚕️ Vista Médico":
 
                     transcripcion_pulida = transcripcion_bruta
                     try:
-                        prompt_correccion = f"""
-Eres un editor y transcriptor médico experto. Corrige la siguiente transcripción en bruto provista por voz.
+                        system_prompt = (
+                            "Eres un editor médico en español. Tu ÚNICA función"
+                            " es corregir ortografía y términos médicos del"
+                            " dictado. NUNCA expliques tus pasos, NUNCA"
+                            " analices las instrucciones, NUNCA respondas en"
+                            " inglés. Devuelve EXCLUSIVAMENTE el texto"
+                            " dictado corregido."
+                        )
+                        prompt_correccion = f"Dictado a corregir:\n{transcripcion_bruta}"
 
-Instrucciones:
-1. Corrige errores fonéticos de terminología médica y anatómica.
-2. Asegúrate de estructurar adecuadamente nombres de pacientes, DNI y folios clínicos.
-3. Devuelve ÚNICAMENTE el texto corregido sin saludos ni introducciones.
-
-Texto en bruto:
-"{transcripcion_bruta}"
-"""
                         res_corr = client.chat.completions.create(
                             model=modelo_activo,
                             messages=[
-                                {"role": "user", "content": prompt_correccion}
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": prompt_correccion},
                             ],
-                            temperature=0.2,
+                            temperature=0.0,
                         )
-                        transcripcion_pulida = (
-                            res_corr.choices[0].message.content.strip()
-                        )
+                        texto_salida = res_corr.choices[0].message.content.strip()
+
+                        # Filtro de seguridad por si el LLM incluye análisis en inglés
+                        if (
+                            "Analyze User Input" not in texto_salida
+                            and "**Role:**" not in texto_salida
+                        ):
+                            transcripcion_pulida = texto_salida
                     except Exception:
                         pass
 
@@ -176,7 +181,7 @@ Dictado: "{transcripcion_pulida}"
                                 {"role": "user", "content": prompt_json}
                             ],
                             response_format={"type": "json_object"},
-                            temperature=0.1,
+                            temperature=0.0,
                         )
                         nombre_paciente = (
                             json.loads(res_json.choices[0].message.content)
